@@ -134,24 +134,35 @@ async def _run_tcp_listen(peer_ip: str, port: int, session_key: bytes) -> None:
     first_conn: asyncio.Future = asyncio.get_running_loop().create_future()
 
     async def _on_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        peername = writer.get_extra_info("peername")
-        if peername is None or _canonical_peer_ip(peername[0]) != _canonical_peer_ip(peer_ip):
-            print(f"已拒绝 TCP 连接：{peername}（仅接受 {peer_ip}）")
+        try:
+            peername = writer.get_extra_info("peername")
+            if peername is None or _canonical_peer_ip(peername[0]) != _canonical_peer_ip(peer_ip):
+                print(f"已拒绝 TCP 连接：{peername}（仅接受 {peer_ip}）", flush=True)
+                writer.close()
+                with contextlib.suppress(Exception):
+                    await writer.wait_closed()
+                return
+            if first_conn.done():
+                writer.close()
+                with contextlib.suppress(Exception):
+                    await writer.wait_closed()
+                return
+            first_conn.set_result((reader, writer))
+        except Exception as exc:
+            print(f"处理入站 TCP 时出错：{exc!r}（peername={writer.get_extra_info('peername')!r}）", flush=True)
             writer.close()
             with contextlib.suppress(Exception):
                 await writer.wait_closed()
-            return
-        if first_conn.done():
-            writer.close()
-            with contextlib.suppress(Exception):
-                await writer.wait_closed()
-            return
-        first_conn.set_result((reader, writer))
 
     server = await asyncio.start_server(_on_client, "0.0.0.0", port)
     async with server:
         serve_task = asyncio.create_task(server.serve_forever())
-        print(f"等待 {peer_ip} 的 TCP 连接（本机端口 {port}）…")
+        print(
+            f"等待 {peer_ip} 的 TCP 连接（本机端口 {port}）…\n"
+            f"若对方已显示「TCP 已连接」而此处一直不停：请在本机执行 `lsof -i :{port}` "
+            "确认是否只有当前程序在监听该端口。",
+            flush=True,
+        )
         try:
             reader, writer = await first_conn
         finally:
