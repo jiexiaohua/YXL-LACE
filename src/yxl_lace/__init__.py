@@ -1,18 +1,6 @@
-from .crypto import DefaultCryptoSuite
-from .peer import UdpPeer
-from .protocol import JsonPacketCodec
-from .reliability import FixedRetryPolicy
-from .session_store import InMemorySessionStore
-from .ui_api import ChatUiApi, MessageEvent, PeerEndpoint, StateEvent
+"""YXL-LACE：TCP + RSA 双向认证 + AES-256-GCM 聊天。
 
-__all__ = [
-    "UdpPeer",
-    "ChatUiApi",
-    "MessageEvent",
-    "StateEvent",
-    "PeerEndpoint",
-    "DefaultCryptoSuite",
-    "JsonPacketCodec",
-    "FixedRetryPolicy",
-    "InMemorySessionStore",
-]
+请使用子模块：`yxl_lace.crypto`、`yxl_lace.tcp_session`。
+"""
+
+__all__: list[str] = []

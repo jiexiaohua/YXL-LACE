@@ -1,7 +1,7 @@
 # YXL-LACE
 
 **Languages / 语言:**
-**English** (this file) · [中文](docs/README.zh.md) · [日本語](docs/README.ja.md) · [한국어](docs/README.ko.md) · [Español](docs/README.es.md)
+**English** (this page) · [中文](README.zh.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Español](README.es.md)
 
 
 ---
