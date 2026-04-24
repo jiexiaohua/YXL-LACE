@@ -130,6 +130,7 @@ def pubkey_initiator_is_local(
 async def handshake_udp_initiator(
     peer_host: str,
     peer_port: int,
+    bind_port: int,
     private_key: rsa.RSAPrivateKey,
     peer_public_key: rsa.RSAPublicKey,
     *,
@@ -140,7 +141,7 @@ async def handshake_udp_initiator(
     queue: asyncio.Queue = asyncio.Queue()
     transport, _ = await loop.create_datagram_endpoint(
         lambda: _UdpQueueProto(queue),
-        local_addr=("0.0.0.0", 0),
+        local_addr=("0.0.0.0", bind_port),
     )
     peer = (peer_host, peer_port)
     deadline = loop.time() + timeout
@@ -286,7 +287,7 @@ async def handshake_udp_symmetric(
     """
     if pubkey_initiator_is_local(private_key, peer_public_key):
         key = await handshake_udp_initiator(
-            peer_host, peer_port, private_key, peer_public_key, timeout=timeout
+            peer_host, peer_port, local_port, private_key, peer_public_key, timeout=timeout
         )
         return key, True, None
     key, peer_ip = await handshake_udp_responder(

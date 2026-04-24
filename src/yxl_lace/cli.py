@@ -236,6 +236,8 @@ async def cmd_connect_user() -> None:
         return
 
     print("UDP 认证成功。正在进入 UDP + AES-GCM 加密聊天…", flush=True)
+    # responder 端握手 socket close 可能不是瞬时生效；让事件循环调度一次以避免紧接着 bind 同端口时报 EADDRINUSE。
+    await asyncio.sleep(0)
     final_peer_ip = peer_ip or host
     await udp_chat_loop(
         session_key=session_key,

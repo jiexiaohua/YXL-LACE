@@ -43,6 +43,7 @@ async def udp_chat_loop(
     transport, _ = await loop.create_datagram_endpoint(
         lambda: _UdpQueueProto(queue),
         local_addr=("0.0.0.0", local_port),
+        reuse_port=True,
     )
     peer: Addr = (peer_ip, peer_port)
 
