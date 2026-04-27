@@ -20,6 +20,12 @@ source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+GUI deps (optional):
+
+```bash
+pip install -r requirements-gui.txt
+```
+
 ## Run
 
 From the repository root:
@@ -32,6 +38,12 @@ Or with an active venv and `PYTHONPATH=src`:
 
 ```bash
 python -m yxl_lace
+```
+
+GUI (Qt / PySide6):
+
+```bash
+PYTHONPATH=src python -m yxl_lace.ui_qt
 ```
 
 ## Layout
@@ -51,4 +63,4 @@ On two machines (or two terminals), clone the repo and run menu **(1)** first to
 
 **(3)** Change the default local port. **(4)** Save contacts (placeholder).
 
-Flow: UDP authentication → **TCP** chat (AES-GCM). Type `/quit` to leave the chat.
+Flow: RSA mutual authentication (UDP) → chat sessions (AES-GCM over UDP). Type `/quit` to leave the chat.

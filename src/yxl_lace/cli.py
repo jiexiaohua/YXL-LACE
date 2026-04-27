@@ -18,6 +18,16 @@ from yxl_lace.crypto import (
 from yxl_lace.print import get_lang, index_out, logo_out, operate_out, set_lang, t
 from yxl_lace.udp_auth import MutualAuthFailed, handshake_udp_chat_symmetric, pubkey_initiator_is_local
 from yxl_lace.udp_chat import udp_chat_loop_with_transport
+from yxl_lace.contacts import (
+    Contact,
+    load_contacts,
+    normalize_public_key_pem,
+    upsert_contact,
+    validate_contact_id,
+    validate_ipv4,
+    validate_label,
+    validate_port,
+)
 
 DEFAULT_KEY_DIR = Path.home() / ".yxl_lace"
 DEFAULT_PRIVATE_KEY_PATH = DEFAULT_KEY_DIR / "rsa_private.pem"
@@ -245,7 +255,82 @@ async def cmd_connect_user() -> None:
 
 
 def cmd_save_user_stub() -> None:
-    print(t("save_user_todo"))
+    try:
+        contact_id = validate_contact_id(prompt_nonempty(t("contact_id_prompt")))
+        label = validate_label(prompt_nonempty(t("contact_label_prompt")))
+        ipv4 = validate_ipv4(prompt_nonempty(t("peer_ipv4_prompt")))
+        port = validate_port(int(prompt_nonempty(t("peer_port_prompt"))))
+        pem = prompt_peer_public_pem().decode("utf-8", errors="strict")
+        pem = normalize_public_key_pem(pem)
+        upsert_contact(
+            Contact(
+                id=contact_id,
+                label=label,
+                ipv4=ipv4,
+                port=port,
+                public_key_pem=pem,
+            )
+        )
+        print(t("contact_saved"))
+    except Exception as exc:
+        print(f"{exc}")
+
+
+async def cmd_connect_saved_contact() -> None:
+    sk = _load_local_private_key()
+    if sk is None:
+        return
+    contacts = load_contacts()
+    if not contacts:
+        print(t("contacts_empty"))
+        return
+    print(t("contacts_list_hdr"))
+    for i, c in enumerate(contacts, start=1):
+        print(f"{i}. {c.id} — {c.label} — {c.ipv4}:{c.port}")
+    try:
+        idx = int(prompt_nonempty(t("contact_choose_prompt")))
+    except ValueError:
+        print(t("port_int_required"))
+        return
+    if not (1 <= idx <= len(contacts)):
+        print(t("invalid_choice"))
+        return
+    c = contacts[idx - 1]
+    print(t("contact_connecting"))
+    # reuse manual connect flow
+    local_port = read_default_comm_port()
+    peer_pk = load_public_key_from_pem(c.public_key_pem.encode("utf-8"))
+    try:
+        is_initiator = pubkey_initiator_is_local(sk, peer_pk)
+    except MutualAuthFailed as exc:
+        msg = t("pubkey_same") if "公钥相同" in str(exc) or "identical" in str(exc) else str(exc)
+        print(msg)
+        return
+    print(t("local_port_show", local_port=local_port, host=c.ipv4, peer_port=c.port))
+    role = t("role_initiator") if is_initiator else t("role_responder", local_port=local_port)
+    print(t("role_prefix") + role)
+    print(t("udp_auth_start"))
+    try:
+        session_key, peer_ip, transport, queue = await handshake_udp_chat_symmetric(
+            c.ipv4, c.port, local_port, sk, peer_pk
+        )
+    except MutualAuthFailed as exc:
+        print(t("udp_auth_fail", err=exc))
+        return
+    except (OSError, asyncio.TimeoutError) as exc:
+        print(t("udp_handshake_fail", err=exc))
+        return
+    print(t("udp_auth_ok"), flush=True)
+    try:
+        await udp_chat_loop_with_transport(
+            session_key=session_key,
+            peer_ip=_canonical_peer_ip(peer_ip),
+            peer_port=c.port,
+            transport=transport,
+            queue=queue,
+        )
+    finally:
+        transport.close()
 
 
 def cmd_switch_language() -> None:
@@ -280,6 +365,8 @@ async def async_main() -> None:
         elif choice == "4":
             cmd_save_user_stub()
         elif choice == "5":
+            await cmd_connect_saved_contact()
+        elif choice == "6":
             cmd_switch_language()
         else:
             print(t("invalid_choice"))

@@ -22,6 +22,12 @@ source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+GUI deps (optional):
+
+```bash
+pip install -r requirements-gui.txt
+```
+
 ## Run
 
 **Type 1:**
@@ -44,6 +50,15 @@ cd dist
 ./YXL-LACE
 ```
 
+**Type 3 (GUI, Qt / PySide6):**
+
+```bash
+PYTHONPATH=src python -m yxl_lace.ui_qt
+```
+
+Notes:
+- Install GUI deps: `pip install PySide6`
+
 ## Layout
 
 - `docs/rsa_tcp_refactor_design.md` — protocol and module design.
@@ -52,6 +67,9 @@ cd dist
 - `src/yxl_lace/tcp_session.py` — TCP chat framing and loop.
 - `src/yxl_lace/print.py` — CLI banners and menu text.
 - `src/yxl_lace/cli.py` — main CLI logic; `src/yxl_lace/__main__.py` enables `python -m yxl_lace`.
+- `src/yxl_lace/ui_qt/` — Qt (PySide6) desktop GUI (minimal chat).
+- `src/yxl_lace/ui/` — Tkinter desktop GUI (legacy).
+- `src/yxl_lace/udp_chat_session.py` — GUI-friendly UDP chat session wrapper.
 
 ## Quick start
 
@@ -59,6 +77,20 @@ On two machines (or two terminals), clone the repo and run menu **(1)** first to
 
 **(2)** Enter the peer’s **IPv4**, **port**, and **PEM public key** (finish the PEM block with a single line containing only `.`). You can start both sides at the same time. The host always uses the **default local port** for UDP/TCP listen (the side with the **smaller RSA public key (DER order)** sends UDP first and acts as the **TCP client**).
 
-**(3)** Change the default local port. **(4)** Save contacts (placeholder).
+**(3)** Change the default local port. **(4)** Save a contact. **(5)** Connect a saved contact. **(6)** Switch language.
 
-Flow: UDP authentication → **TCP** chat (AES-GCM). Type `/quit` to leave the chat.
+Flow: RSA mutual authentication (UDP) → chat sessions (AES-GCM over UDP). Type `/quit` to leave the CLI chat.
+
+## Packaging (PyInstaller)
+
+CLI (onefile):
+
+```bash
+pyinstaller -F -n YXL-LACE src/yxl_lace/__main__.py
+```
+
+GUI (onefile):
+
+```bash
+pyinstaller -F -n YXL-LACE-GUI --icon assets/app.icns --add-data "assets/app.png:assets" run_ui.py
+```

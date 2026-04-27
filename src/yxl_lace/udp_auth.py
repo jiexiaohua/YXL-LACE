@@ -20,6 +20,8 @@ KIND_C1 = 0x01
 KIND_C2 = 0x02
 KIND_C3 = 0x03
 KIND_C4 = 0x04
+# 聊天数据报文（body 为 AES-GCM blob）
+KIND_CHAT = 0x10
 
 logger = logging.getLogger(__name__)
 
@@ -30,11 +32,11 @@ class MutualAuthFailed(Exception):
     """双向 RSA 挑战–应答（UDP 阶段）失败。"""
 
 
-def _pack_frame(payload: bytes) -> bytes:
+def pack_frame(payload: bytes) -> bytes:
     return len(payload).to_bytes(4, "big") + payload
 
 
-def _unpack_frame(datagram: bytes) -> bytes:
+def unpack_frame(datagram: bytes) -> bytes:
     if len(datagram) < 4:
         raise MutualAuthFailed("UDP 报文过短")
     n = int.from_bytes(datagram[:4], "big")
@@ -44,12 +46,12 @@ def _unpack_frame(datagram: bytes) -> bytes:
     return body
 
 
-def _pack_typed(kind: int, rsa_blob: bytes) -> bytes:
-    return _pack_frame(bytes([kind]) + rsa_blob)
+def pack_typed(kind: int, body: bytes) -> bytes:
+    return pack_frame(bytes([kind]) + body)
 
 
-def _unpack_typed(datagram: bytes) -> Tuple[int, bytes]:
-    inner = _unpack_frame(datagram)
+def unpack_typed(datagram: bytes) -> Tuple[int, bytes]:
+    inner = unpack_frame(datagram)
     if len(inner) < 2:
         raise MutualAuthFailed("报文过短")
     return inner[0], inner[1:]
@@ -100,7 +102,7 @@ async def _recv_typed(
         if require_src_port is not None and addr[1] != require_src_port:
             continue
         try:
-            kind, body = _unpack_typed(raw)
+            kind, body = unpack_typed(raw)
         except MutualAuthFailed:
             continue
         if kind != expect_kind:
@@ -147,7 +149,7 @@ async def handshake_udp_initiator(
     deadline = loop.time() + timeout
 
     def send_typed(kind: int, rsa_blob: bytes) -> None:
-        transport.sendto(_pack_typed(kind, rsa_blob), peer)
+        transport.sendto(pack_typed(kind, rsa_blob), peer)
 
     try:
         r_a = secrets.token_bytes(CHALLENGE_BYTES)
@@ -166,7 +168,7 @@ async def handshake_udp_initiator(
             if addr[1] != peer_port:
                 continue
             try:
-                kind, body = _unpack_typed(raw)
+                kind, body = unpack_typed(raw)
             except MutualAuthFailed:
                 continue
             if kind != KIND_C2:
@@ -240,11 +242,11 @@ async def handshake_udp_responder(
             raise MutualAuthFailed("挑战长度无效")
 
         c2 = rsa_oaep_encrypt(peer_public_key, r_a)
-        transport.sendto(_pack_typed(KIND_C2, c2), peer_addr)
+        transport.sendto(pack_typed(KIND_C2, c2), peer_addr)
 
         r_b = secrets.token_bytes(CHALLENGE_BYTES)
         c3 = rsa_oaep_encrypt(peer_public_key, r_b)
-        transport.sendto(_pack_typed(KIND_C3, c3), peer_addr)
+        transport.sendto(pack_typed(KIND_C3, c3), peer_addr)
 
         c4, addr2 = await _recv_typed(
             queue,
@@ -324,7 +326,7 @@ async def handshake_udp_chat_symmetric(
         peer: Addr = (peer_host, peer_port)
 
         def send_typed(kind: int, rsa_blob: bytes) -> None:
-            transport.sendto(_pack_typed(kind, rsa_blob), peer)
+            transport.sendto(pack_typed(kind, rsa_blob), peer)
 
         if pubkey_initiator_is_local(private_key, peer_public_key):
             # 先手：复用 transport/queue 进行握手，不关闭 socket。
@@ -344,7 +346,7 @@ async def handshake_udp_chat_symmetric(
                 if addr[1] != peer_port:
                     continue
                 try:
-                    kind, body = _unpack_typed(raw)
+                    kind, body = unpack_typed(raw)
                 except MutualAuthFailed:
                     continue
                 if kind != KIND_C2:
@@ -399,11 +401,11 @@ async def handshake_udp_chat_symmetric(
             raise MutualAuthFailed("挑战长度无效")
 
         c2 = rsa_oaep_encrypt(peer_public_key, r_a)
-        transport.sendto(_pack_typed(KIND_C2, c2), peer_addr)
+        transport.sendto(pack_typed(KIND_C2, c2), peer_addr)
 
         r_b = secrets.token_bytes(CHALLENGE_BYTES)
         c3 = rsa_oaep_encrypt(peer_public_key, r_b)
-        transport.sendto(_pack_typed(KIND_C3, c3), peer_addr)
+        transport.sendto(pack_typed(KIND_C3, c3), peer_addr)
 
         c4, addr2 = await _recv_typed(
             queue,

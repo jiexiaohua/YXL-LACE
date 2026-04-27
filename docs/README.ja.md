@@ -20,6 +20,12 @@ source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+GUI 依存（任意）：
+
+```bash
+pip install -r requirements-gui.txt
+```
+
 ## 実行
 
 リポジトリルートで：
@@ -32,6 +38,12 @@ pip install -r requirements.txt
 
 ```bash
 python -m yxl_lace
+```
+
+GUI（Qt / PySide6）：
+
+```bash
+PYTHONPATH=src python -m yxl_lace.ui_qt
 ```
 
 ## 構成
@@ -51,4 +63,4 @@ python -m yxl_lace
 
 **(3)** 既定ローカルポート変更。**(4)** 連絡先保存（プレースホルダー）。
 
-流れ：UDP 認証 → **TCP**（AES-GCM）チャット。`/quit` で終了。
+流れ：RSA 相互認証（UDP）→ チャット（AES-GCM over UDP）。`/quit` で終了。

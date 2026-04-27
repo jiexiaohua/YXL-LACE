@@ -20,6 +20,12 @@ source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+GUI 依赖（可选）：
+
+```bash
+pip install -r requirements-gui.txt
+```
+
 ## 运行
 
 仓库根目录一键启动：
@@ -32,6 +38,12 @@ pip install -r requirements.txt
 
 ```bash
 python -m yxl_lace
+```
+
+GUI（Qt / PySide6）：
+
+```bash
+PYTHONPATH=src python -m yxl_lace.ui_qt
 ```
 
 ## 目录结构
@@ -51,5 +63,5 @@ python -m yxl_lace
 
 `(3)`：修改本机默认端口。`(4)`：保存用户（占位）。
 
-流程：UDP 认证 → **TCP**（AES-GCM）聊天。输入 `/quit` 退出聊天。
+流程：RSA（UDP）双向认证 → UDP（AES-GCM）聊天会话。输入 `/quit` 退出聊天。
 

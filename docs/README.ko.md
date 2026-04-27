@@ -20,6 +20,12 @@ source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+GUI 의존성(선택):
+
+```bash
+pip install -r requirements-gui.txt
+```
+
 ## 실행
 
 저장소 루트에서:
@@ -32,6 +38,12 @@ pip install -r requirements.txt
 
 ```bash
 python -m yxl_lace
+```
+
+GUI (Qt / PySide6):
+
+```bash
+PYTHONPATH=src python -m yxl_lace.ui_qt
 ```
 
 ## 구조
@@ -51,4 +63,4 @@ python -m yxl_lace
 
 **(3)** 기본 로컬 포트 변경. **(4)** 연락처 저장(플레이스홀더).
 
-흐름: UDP 인증 → **TCP**(AES-GCM) 채팅. `/quit`로 종료.
+흐름: RSA 상호 인증(UDP) → 채팅(AES-GCM over UDP). `/quit`로 종료.
