@@ -1,12 +1,14 @@
-# YXL-LACE
-
+# YXL-LACE(Local Area Crypto Encryption)
 **Languages / 语言:**
+
 **English** (this file) · [中文](docs/README.zh.md) · [日本語](docs/README.ja.md) · [한국어](docs/README.ko.md) · [Español](docs/README.es.md)
 
 
 ---
 
 P2P terminal chat **without a central server**: **UDP** carries **RSA-OAEP** mutual challenge–response; **TCP** carries **AES-256-GCM** encrypted messages. The local default port is **9001** (change via menu **(3)**, stored in `~/.yxl_lace/default_comm_port`). For **(2)** you only enter the peer’s **IPv4** and **port**.
+
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/) ![CLI](https://img.shields.io/badge/CLI-Terminal-4EAA25?logo=gnu-bash&logoColor=white) ![P2P](https://img.shields.io/badge/P2P-Serverless-111827) ![UDP](https://img.shields.io/badge/UDP-Handshake-0EA5E9) ![TCP](https://img.shields.io/badge/TCP-Chat-6366F1) ![RSA](https://img.shields.io/badge/RSA-OAEP-8B5CF6) ![AES](https://img.shields.io/badge/AES-256--GCM-F59E0B) [![cryptography](https://img.shields.io/badge/cryptography-lib-2CA5E0)](https://pypi.org/project/cryptography/)
 
 ## Requirements
 
@@ -20,6 +22,8 @@ pip install -r requirements.txt
 
 ## Run
 
+**Type 1:**
+
 From the repository root:
 
 ```bash
@@ -30,6 +34,12 @@ Or with an active venv and `PYTHONPATH=src`:
 
 ```bash
 python -m yxl_lace
+```
+
+**Type 2:**
+```
+cd dist
+./YXL-LACE
 ```
 
 ## Layout
