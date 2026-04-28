@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import ipaddress
+import sys
 from pathlib import Path
 
 from yxl_lace.crypto import (
@@ -16,28 +17,25 @@ from yxl_lace.crypto import (
     write_public_key_pem,
 )
 from yxl_lace.print import get_lang, index_out, logo_out, operate_out, set_lang, t
-from yxl_lace.udp_auth import MutualAuthFailed, handshake_udp_chat_symmetric, pubkey_initiator_is_local
-from yxl_lace.udp_chat import udp_chat_loop_with_transport
+from yxl_lace.udp_auth import MutualAuthFailed, pubkey_initiator_is_local
 from yxl_lace.contacts import (
     Contact,
+    add_contact,
     load_contacts,
     normalize_public_key_pem,
     upsert_contact,
-    validate_contact_id,
+    update_contact_label,
     validate_ipv4,
     validate_label,
     validate_port,
 )
+from yxl_lace.session_manager import SessionManager
 
 DEFAULT_KEY_DIR = Path.home() / ".yxl_lace"
 DEFAULT_PRIVATE_KEY_PATH = DEFAULT_KEY_DIR / "rsa_private.pem"
 DEFAULT_PUBLIC_KEY_PATH = DEFAULT_KEY_DIR / "rsa_public.pem"
 DEFAULT_COMM_PORT_FILE = DEFAULT_KEY_DIR / "default_comm_port"
 DEFAULT_COMM_PORT_FALLBACK = 9001
-
-TCP_CONNECT_RETRIES = 32
-TCP_CONNECT_DELAY_S = 0.25
-
 
 def _canonical_peer_ip(addr: object) -> str:
     """与 UDP 记录的 IPv4 和 TCP peername（可能为 ::ffff:x.x.x.x）统一成可比较形式。"""
@@ -129,74 +127,13 @@ def _load_local_private_key():
     return load_private_key_from_pem(DEFAULT_PRIVATE_KEY_PATH.read_bytes())
 
 
-async def _tcp_connect_with_retry(host: str, port: int):
-    last_exc: Exception | None = None
-    for _ in range(TCP_CONNECT_RETRIES):
-        try:
-            return await asyncio.wait_for(asyncio.open_connection(host, port), timeout=5.0)
-        except (OSError, asyncio.TimeoutError) as exc:
-            last_exc = exc
-            await asyncio.sleep(TCP_CONNECT_DELAY_S)
-    raise last_exc if last_exc else OSError("TCP 连接失败")
-
-
-async def _run_tcp_listen(peer_ip: str, port: int, session_key: bytes) -> None:
-    first_conn: asyncio.Future = asyncio.get_running_loop().create_future()
-
-    async def _on_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        try:
-            peername = writer.get_extra_info("peername")
-            exp = _canonical_peer_ip(peer_ip)
-            obs = _canonical_peer_ip(peername[0]) if peername else ""
-            if peername is None or obs != exp:
-                print(
-                    f"已拒绝 TCP 连接：{peername}（仅接受来自 {peer_ip}；"
-                    f"规范化地址 收到 {obs!r} ≠ 期望 {exp!r}）",
-                    flush=True,
-                )
-                writer.close()
-                with contextlib.suppress(Exception):
-                    await writer.wait_closed()
-                return
-            if first_conn.done():
-                writer.close()
-                with contextlib.suppress(Exception):
-                    await writer.wait_closed()
-                return
-            writer.write(TCP_ROLE_ACK)
-            await writer.drain()
-            first_conn.set_result((reader, writer))
-        except Exception as exc:
-            print(f"处理入站 TCP 时出错：{exc!r}（peername={writer.get_extra_info('peername')!r}）", flush=True)
-            writer.close()
-            with contextlib.suppress(Exception):
-                await writer.wait_closed()
-
-    server = await asyncio.start_server(_on_client, "0.0.0.0", port)
-    async with server:
-        serve_task = asyncio.create_task(server.serve_forever())
-        print(
-            f"等待 {peer_ip} 的 TCP 连接（本机端口 {port}）…\n"
-            f"若对方已显示「TCP 已连接」而此处一直不停：请在本机执行 `lsof -i :{port}` "
-            "确认是否只有当前程序在监听该端口。",
-            flush=True,
-        )
-        try:
-            reader, writer = await first_conn
-        finally:
-            serve_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await serve_task
-
-    print("TCP 已连接。输入 /quit 退出聊天。", flush=True)
-    await chat_loop(reader, writer, session_key)
+#
+# NOTE:
+# TCP chat has been deprecated/removed in favor of single-port UDP SessionManager.
+#
 
 
 async def cmd_connect_user() -> None:
-    sk = _load_local_private_key()
-    if sk is None:
-        return
-
     local_port = read_default_comm_port()
     # 这些提示信息的详细版可以后续扩展；这里保持简洁并走 i18n。
 
@@ -217,6 +154,12 @@ async def cmd_connect_user() -> None:
         print(t("pubkey_invalid", err=exc))
         return
 
+    if not DEFAULT_PRIVATE_KEY_PATH.is_file():
+        print(t("need_generate_key", path=DEFAULT_PRIVATE_KEY_PATH))
+        return
+    local_priv_pem = DEFAULT_PRIVATE_KEY_PATH.read_bytes()
+    sk = load_private_key_from_pem(local_priv_pem)
+
     try:
         is_initiator = pubkey_initiator_is_local(sk, peer_pk)
     except MutualAuthFailed as exc:
@@ -230,63 +173,106 @@ async def cmd_connect_user() -> None:
     print(t("role_prefix") + role)
     print(t("udp_auth_start"))
 
-    try:
-        session_key, peer_ip, transport, queue = await handshake_udp_chat_symmetric(
-            host, peer_port, local_port, sk, peer_pk
-        )
-    except MutualAuthFailed as exc:
-        print(t("udp_auth_fail", err=exc))
-        return
-    except (OSError, asyncio.TimeoutError) as exc:
-        print(t("udp_handshake_fail", err=exc))
-        return
+    peer_closed = asyncio.Event()
 
-    print(t("udp_auth_ok"), flush=True)
+    def _on_msg(peer: tuple[str, int], text: str) -> None:
+        print(f"\n[peer {peer[0]}:{peer[1]}] {text}", flush=True)
+
+    def _on_peer_closed(peer: tuple[str, int]) -> None:
+        print(f"\n[peer {peer[0]}:{peer[1]}] closed.", flush=True)
+        peer_closed.set()
+
+    mgr = SessionManager(
+        local_port=local_port,
+        local_private_key_pem=local_priv_pem,
+        on_message=_on_msg,
+        on_peer_closed=_on_peer_closed,
+        on_status=lambda s: print(f"[status] {s}", flush=True),
+    )
     try:
-        await udp_chat_loop_with_transport(
-            session_key=session_key,
-            peer_ip=_canonical_peer_ip(peer_ip),
-            peer_port=peer_port,
-            transport=transport,
-            queue=queue,
-        )
+        await mgr.start()
+        peer = await mgr.connect_peer(peer_ip=host, peer_port=peer_port, peer_public_key_pem=pem)
+        print(t("udp_auth_ok"), flush=True)
+
+        # stdin non-blocking reader (allows exit on peer close)
+        loop = asyncio.get_running_loop()
+        reader = asyncio.StreamReader()
+        protocol = asyncio.StreamReaderProtocol(reader)
+        await loop.connect_read_pipe(lambda: protocol, sys.stdin)
+
+        print(t("chat_ready", local=f"0.0.0.0:{local_port}", peer_ip=peer[0], peer_port=peer[1]), flush=True)
+        while True:
+            if peer_closed.is_set():
+                break
+            print("> ", end="", flush=True)
+            t_line = asyncio.create_task(reader.readline())
+            t_closed = asyncio.create_task(peer_closed.wait())
+            done, pending = await asyncio.wait(
+                {t_line, t_closed}, return_when=asyncio.FIRST_COMPLETED
+            )
+            for p in pending:
+                p.cancel()
+            if t_closed in done:
+                break
+            raw = t_line.result()
+            if not raw:
+                break
+            line = raw.decode("utf-8", errors="replace").rstrip("\n\r")
+            if line == "/quit":
+                await mgr.close_peer(peer)
+                break
+            mgr.send(peer, line)
     finally:
-        transport.close()
+        with contextlib.suppress(Exception):
+            await mgr.close()
 
 
 def cmd_save_user_stub() -> None:
     try:
-        contact_id = validate_contact_id(prompt_nonempty(t("contact_id_prompt")))
         label = validate_label(prompt_nonempty(t("contact_label_prompt")))
         ipv4 = validate_ipv4(prompt_nonempty(t("peer_ipv4_prompt")))
         port = validate_port(int(prompt_nonempty(t("peer_port_prompt"))))
         pem = prompt_peer_public_pem().decode("utf-8", errors="strict")
         pem = normalize_public_key_pem(pem)
-        upsert_contact(
-            Contact(
-                id=contact_id,
-                label=label,
-                ipv4=ipv4,
-                port=port,
-                public_key_pem=pem,
-            )
-        )
+        add_contact(label=label, ipv4=ipv4, port=port, public_key_pem=pem)
         print(t("contact_saved"))
     except Exception as exc:
         print(f"{exc}")
 
 
-async def cmd_connect_saved_contact() -> None:
-    sk = _load_local_private_key()
-    if sk is None:
-        return
+def cmd_edit_contact_label() -> None:
     contacts = load_contacts()
     if not contacts:
         print(t("contacts_empty"))
         return
     print(t("contacts_list_hdr"))
     for i, c in enumerate(contacts, start=1):
-        print(f"{i}. {c.id} — {c.label} — {c.ipv4}:{c.port}")
+        print(f"{i}. {c.label} — {c.ipv4}:{c.port}")
+    try:
+        idx = int(prompt_nonempty(t("contact_choose_prompt")))
+    except ValueError:
+        print(t("port_int_required"))
+        return
+    if not (1 <= idx <= len(contacts)):
+        print(t("invalid_choice"))
+        return
+    c = contacts[idx - 1]
+    try:
+        new_label = validate_label(prompt_nonempty(t("contact_label_prompt")))
+        update_contact_label(c.id, new_label)
+        print(t("contact_saved"))
+    except Exception as exc:
+        print(f"{exc}")
+
+
+async def cmd_connect_saved_contact() -> None:
+    contacts = load_contacts()
+    if not contacts:
+        print(t("contacts_empty"))
+        return
+    print(t("contacts_list_hdr"))
+    for i, c in enumerate(contacts, start=1):
+        print(f"{i}. {c.label} — {c.ipv4}:{c.port}")
     try:
         idx = int(prompt_nonempty(t("contact_choose_prompt")))
     except ValueError:
@@ -297,9 +283,14 @@ async def cmd_connect_saved_contact() -> None:
         return
     c = contacts[idx - 1]
     print(t("contact_connecting"))
-    # reuse manual connect flow
     local_port = read_default_comm_port()
-    peer_pk = load_public_key_from_pem(c.public_key_pem.encode("utf-8"))
+    peer_pem = c.public_key_pem.encode("utf-8")
+    peer_pk = load_public_key_from_pem(peer_pem)
+    if not DEFAULT_PRIVATE_KEY_PATH.is_file():
+        print(t("need_generate_key", path=DEFAULT_PRIVATE_KEY_PATH))
+        return
+    local_priv_pem = DEFAULT_PRIVATE_KEY_PATH.read_bytes()
+    sk = load_private_key_from_pem(local_priv_pem)
     try:
         is_initiator = pubkey_initiator_is_local(sk, peer_pk)
     except MutualAuthFailed as exc:
@@ -310,27 +301,58 @@ async def cmd_connect_saved_contact() -> None:
     role = t("role_initiator") if is_initiator else t("role_responder", local_port=local_port)
     print(t("role_prefix") + role)
     print(t("udp_auth_start"))
+
+    peer_closed = asyncio.Event()
+
+    def _on_msg(peer: tuple[str, int], text: str) -> None:
+        print(f"\n[peer {peer[0]}:{peer[1]}] {text}", flush=True)
+
+    def _on_peer_closed(peer: tuple[str, int]) -> None:
+        print(f"\n[peer {peer[0]}:{peer[1]}] closed.", flush=True)
+        peer_closed.set()
+
+    mgr = SessionManager(
+        local_port=local_port,
+        local_private_key_pem=local_priv_pem,
+        on_message=_on_msg,
+        on_peer_closed=_on_peer_closed,
+        on_status=lambda s: print(f"[status] {s}", flush=True),
+    )
     try:
-        session_key, peer_ip, transport, queue = await handshake_udp_chat_symmetric(
-            c.ipv4, c.port, local_port, sk, peer_pk
-        )
-    except MutualAuthFailed as exc:
-        print(t("udp_auth_fail", err=exc))
-        return
-    except (OSError, asyncio.TimeoutError) as exc:
-        print(t("udp_handshake_fail", err=exc))
-        return
-    print(t("udp_auth_ok"), flush=True)
-    try:
-        await udp_chat_loop_with_transport(
-            session_key=session_key,
-            peer_ip=_canonical_peer_ip(peer_ip),
-            peer_port=c.port,
-            transport=transport,
-            queue=queue,
-        )
+        await mgr.start()
+        peer = await mgr.connect_peer(peer_ip=c.ipv4, peer_port=c.port, peer_public_key_pem=peer_pem)
+        print(t("udp_auth_ok"), flush=True)
+
+        loop = asyncio.get_running_loop()
+        reader = asyncio.StreamReader()
+        protocol = asyncio.StreamReaderProtocol(reader)
+        await loop.connect_read_pipe(lambda: protocol, sys.stdin)
+
+        print(t("chat_ready", local=f"0.0.0.0:{local_port}", peer_ip=peer[0], peer_port=peer[1]), flush=True)
+        while True:
+            if peer_closed.is_set():
+                break
+            print("> ", end="", flush=True)
+            t_line = asyncio.create_task(reader.readline())
+            t_closed = asyncio.create_task(peer_closed.wait())
+            done, pending = await asyncio.wait(
+                {t_line, t_closed}, return_when=asyncio.FIRST_COMPLETED
+            )
+            for p in pending:
+                p.cancel()
+            if t_closed in done:
+                break
+            raw = t_line.result()
+            if not raw:
+                break
+            line = raw.decode("utf-8", errors="replace").rstrip("\n\r")
+            if line == "/quit":
+                await mgr.close_peer(peer)
+                break
+            mgr.send(peer, line)
     finally:
-        transport.close()
+        with contextlib.suppress(Exception):
+            await mgr.close()
 
 
 def cmd_switch_language() -> None:
@@ -368,6 +390,8 @@ async def async_main() -> None:
             await cmd_connect_saved_contact()
         elif choice == "6":
             cmd_switch_language()
+        elif choice == "7":
+            cmd_edit_contact_label()
         else:
             print(t("invalid_choice"))
 

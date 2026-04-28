@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable, Optional
@@ -122,6 +123,55 @@ def upsert_contact(new_contact: Contact, path: Path = DEFAULT_CONTACTS_PATH) -> 
     by_id = {c.id: c for c in contacts}
     by_id[new_contact.id] = new_contact
     save_contacts(by_id.values(), path)
+
+
+def generate_contact_id(path: Path = DEFAULT_CONTACTS_PATH) -> str:
+    """
+    Generate a short random, file-stable contact id.
+    - Hidden from UI/CLI input.
+    - Must satisfy `validate_contact_id`.
+    """
+    existing = {c.id for c in load_contacts(path)}
+    for _ in range(128):
+        cid = secrets.token_hex(4)  # 8 hex chars
+        try:
+            cid = validate_contact_id(cid)
+        except ValueError:
+            continue
+        if cid not in existing:
+            return cid
+    raise RuntimeError("failed to generate unique contact id")
+
+
+def update_contact_label(contact_id: str, new_label: str, path: Path = DEFAULT_CONTACTS_PATH) -> None:
+    cid = validate_contact_id(contact_id)
+    label = validate_label(new_label)
+    contacts = load_contacts(path)
+    by_id = {c.id: c for c in contacts}
+    cur = by_id.get(cid)
+    if cur is None:
+        raise ValueError("contact not found")
+    by_id[cid] = Contact(id=cur.id, label=label, ipv4=cur.ipv4, port=cur.port, public_key_pem=cur.public_key_pem)
+    save_contacts(by_id.values(), path)
+
+
+def add_contact(
+    *,
+    label: str,
+    ipv4: str,
+    port: int,
+    public_key_pem: str,
+    path: Path = DEFAULT_CONTACTS_PATH,
+) -> Contact:
+    c = Contact(
+        id=generate_contact_id(path),
+        label=validate_label(label),
+        ipv4=validate_ipv4(ipv4),
+        port=validate_port(port),
+        public_key_pem=normalize_public_key_pem(public_key_pem),
+    )
+    upsert_contact(c, path)
+    return c
 
 
 def find_contact_by_id(contact_id: str, path: Path = DEFAULT_CONTACTS_PATH) -> Optional[Contact]:

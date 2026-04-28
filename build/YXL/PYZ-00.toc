@@ -1,4 +1,4 @@
-('/Users/xiaohuajie/workPlace/Project/p2p/YXL-LACE/build/YXL-LACE-GUI/PYZ-00.pyz',
+('/Users/xiaohuajie/workPlace/Project/p2p/YXL-LACE/build/YXL/PYZ-00.pyz',
  [('PySide6',
    '/Users/xiaohuajie/workPlace/Project/p2p/YXL-LACE/.venv/lib/python3.14/site-packages/PySide6/__init__.py',
    'PYMODULE'),

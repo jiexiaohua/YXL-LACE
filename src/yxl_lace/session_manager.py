@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hmac
+import json
 import logging
 import secrets
+import time
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional, Tuple
 
@@ -28,6 +30,7 @@ from .udp_auth import (
     KIND_C3,
     KIND_C4,
     KIND_CHAT,
+    KIND_CTRL,
     MutualAuthFailed,
     pack_typed,
     pubkey_initiator_is_local,
@@ -39,6 +42,7 @@ logger = logging.getLogger(__name__)
 Addr = Tuple[str, int]
 OnMessage = Callable[[Addr, str], None]
 OnStatus = Callable[[str], None]
+OnPeerClosed = Callable[[Addr], None]
 
 MAX_CHAT_BLOB = 1200 + 64
 MAX_CHAT_PLAIN = 1200
@@ -73,11 +77,13 @@ class SessionManager:
         local_port: int,
         local_private_key_pem: bytes,
         on_message: OnMessage,
+        on_peer_closed: Optional[OnPeerClosed] = None,
         on_status: Optional[OnStatus] = None,
     ) -> None:
         self.local_port = local_port
         self._sk: rsa.RSAPrivateKey = load_private_key_from_pem(local_private_key_pem)
         self._on_message = on_message
+        self._on_peer_closed = on_peer_closed
         self._on_status = on_status
 
         self._transport: asyncio.DatagramTransport | None = None
@@ -88,6 +94,8 @@ class SessionManager:
         self._peer_q: dict[Addr, asyncio.Queue] = {}
         self._handshake_tasks: dict[Addr, asyncio.Task] = {}
         self._sessions: dict[Addr, Session] = {}
+        # peer -> close_id -> future resolved on ACK
+        self._close_waiters: dict[Addr, dict[str, asyncio.Future[None]]] = {}
 
     @property
     def sockname(self) -> Optional[Addr]:
@@ -119,6 +127,15 @@ class SessionManager:
         for t in list(self._handshake_tasks.values()):
             with contextlib.suppress(asyncio.CancelledError):
                 await t
+        # cancel pending close waiters
+        for peer_waiters in list(self._close_waiters.values()):
+            for fut in list(peer_waiters.values()):
+                if not fut.done():
+                    fut.cancel()
+        self._close_waiters.clear()
+        self._sessions.clear()
+        self._peer_q.clear()
+        self._handshake_tasks.clear()
         if self._transport is not None:
             self._transport.close()
         self._transport = None
@@ -140,6 +157,40 @@ class SessionManager:
         if self._transport is None:
             raise RuntimeError("manager not started")
         self._transport.sendto(pack_typed(KIND_CHAT, blob), peer)
+
+    async def close_peer(self, peer: Addr, *, timeout: float = 2.0) -> None:
+        """
+        Gracefully close a peer session:
+        - Send CTRL close(id)
+        - Wait for CTRL ack(id) up to `timeout`
+        - Drop local session regardless
+        """
+        sess = self._sessions.get(peer)
+        if sess is None:
+            return
+        if self._transport is None:
+            # already stopped; just drop local state
+            self._drop_session(peer)
+            return
+
+        loop = asyncio.get_running_loop()
+        close_id = secrets.token_hex(4)
+        fut = loop.create_future()
+        self._close_waiters.setdefault(peer, {})[close_id] = fut
+        try:
+            self._send_ctrl(peer, {"t": "close", "id": close_id, "ts": int(time.time())})
+            with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
+                await asyncio.wait_for(fut, timeout=timeout)
+        finally:
+            # cleanup waiter
+            peer_waiters = self._close_waiters.get(peer)
+            if peer_waiters is not None:
+                peer_waiters.pop(close_id, None)
+                if not peer_waiters:
+                    self._close_waiters.pop(peer, None)
+            self._drop_session(peer)
+            if self._on_status:
+                self._on_status(f"session_closed peer={peer}")
 
     async def connect_peer(self, *, peer_ip: str, peer_port: int, peer_public_key_pem: bytes) -> Addr:
         """
@@ -189,6 +240,40 @@ class SessionManager:
                 self._on_message(addr, text)
                 continue
 
+            if kind == KIND_CTRL:
+                sess = self._sessions.get(addr)
+                if sess is None:
+                    continue
+                if not body or len(body) > MAX_CHAT_BLOB:
+                    continue
+                try:
+                    text = aes_gcm_open(sess.key, body).decode("utf-8", errors="replace")
+                    msg = json.loads(text)
+                except Exception:
+                    continue
+                if not isinstance(msg, dict):
+                    continue
+                t = msg.get("t")
+                cid = msg.get("id")
+                if not isinstance(t, str) or not isinstance(cid, str) or not cid:
+                    continue
+                if t == "close":
+                    # reply ACK, then drop session and notify
+                    self._send_ctrl(addr, {"t": "ack", "id": cid})
+                    self._drop_session(addr)
+                    if self._on_peer_closed is not None:
+                        self._on_peer_closed(addr)
+                    if self._on_status:
+                        self._on_status(f"peer_closed peer={addr}")
+                elif t == "ack":
+                    peer_waiters = self._close_waiters.get(addr)
+                    if peer_waiters is None:
+                        continue
+                    fut = peer_waiters.get(cid)
+                    if fut is not None and not fut.done():
+                        fut.set_result(None)
+                continue
+
             # handshake kinds
             if kind in (KIND_C1, KIND_C2, KIND_C3, KIND_C4):
                 # Auto-accept inbound handshake if C1 arrives from unknown peer and we have its public key.
@@ -202,6 +287,30 @@ class SessionManager:
                         if pk is not None:
                             self._handshake_tasks[addr] = asyncio.create_task(self._handshake_responder(addr, pk))
                 self._get_peer_queue(addr).put_nowait((kind, body))
+
+    def _send_ctrl(self, peer: Addr, msg: dict) -> None:
+        sess = self._sessions.get(peer)
+        if sess is None:
+            return
+        if self._transport is None:
+            return
+        raw = json.dumps(msg, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if len(raw) > MAX_CHAT_PLAIN:
+            return
+        blob = aes_gcm_seal(sess.key, raw)
+        self._transport.sendto(pack_typed(KIND_CTRL, blob), peer)
+
+    def _drop_session(self, peer: Addr) -> None:
+        self._sessions.pop(peer, None)
+        self._peer_q.pop(peer, None)
+        t = self._handshake_tasks.pop(peer, None)
+        if t is not None:
+            t.cancel()
+        peer_waiters = self._close_waiters.pop(peer, None)
+        if peer_waiters is not None:
+            for fut in list(peer_waiters.values()):
+                if not fut.done():
+                    fut.cancel()
 
     async def _recv_kind(self, peer: Addr, expect_kind: int, *, deadline: float) -> bytes:
         q = self._get_peer_queue(peer)

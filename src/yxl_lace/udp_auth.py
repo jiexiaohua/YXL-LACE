@@ -22,6 +22,8 @@ KIND_C3 = 0x03
 KIND_C4 = 0x04
 # 聊天数据报文（body 为 AES-GCM blob）
 KIND_CHAT = 0x10
+# 控制报文（body 建议为 AES-GCM 加密的 JSON，例如 close/ack）
+KIND_CTRL = 0x11
 
 logger = logging.getLogger(__name__)
 
